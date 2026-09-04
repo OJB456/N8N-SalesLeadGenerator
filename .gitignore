@@ -1,0 +1,7 @@
+# n8n / Docker
+.env
+docker-compose.override.yml
+**/node_modules
+**/.DS_Store
+postgres_data
+n8n_data

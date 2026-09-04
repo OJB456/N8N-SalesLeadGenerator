@@ -1,0 +1,674 @@
+{
+  "name": "Lead Gen Pipeline",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "path": "lead-intake",
+        "httpMethod": "POST",
+        "responseMode": "onReceived",
+        "responseData": "default"
+      },
+      "id": "1",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract input values from the incoming webhook payload\\nconst payload = items[0].json;\\nreturn [{ json: {\\n  company_name: payload.company_name || payload.company || '',\\n  domain: payload.domain || '',\\n  linkedin_url: payload.linkedin_url || payload.linkedin || '',\\n  source: payload.source || 'webhook'\\n}}];"
+      },
+      "id": "2",
+      "name": "Normalize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "schema": "leadgen",
+        "table": "leads",
+        "columns": [
+          {
+            "name": "company_name",
+            "value": "={{$json.company_name}}"
+          },
+          {
+            "name": "domain",
+            "value": "={{$json.domain}}"
+          },
+          {
+            "name": "linkedin_url",
+            "value": "={{$json.linkedin_url}}"
+          },
+          {
+            "name": "source",
+            "value": "={{$json.source}}"
+          },
+          {
+            "name": "status",
+            "value": "new"
+          }
+        ],
+        "options": {
+          "upsert": false
+        }
+      },
+      "id": "3",
+      "name": "Save Lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Decide whether the lead is prequalified and attach a boolean flag\\nconst source = $json.source || '';\\nconst prequalified = source === 'manual-intake' || source === 'marketing';\\nreturn [{ json: { prequalified } }];"
+      },
+      "id": "4",
+      "name": "Determine Flow",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [450, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Build structured messages for Anthropic Messages API, embedding extraction schema and the system prompt, include enrichment content if present\\nconst system = `You are a lead qualification assistant. Given a company profile and sales signals, extract the following structured fields exactly as JSON: industry, tech_stack_signals, pain_points, buying_signals, icp_fit_score, and score_reasoning. Use the data available from discovery and enrichment only. Do not add extra fields or commentary.`;\\nconst schema = {\\n  type: 'object',\\n  properties: {\\n    industry: { type: 'string' },\\n    tech_stack_signals: { type: 'array', items: { type: 'string' } },\\n    pain_points: { type: 'array', items: { type: 'string' } },\\n    buying_signals: { type: 'array', items: { type: 'string' } },\\n    icp_fit_score: { type: 'integer' },\\n    score_reasoning: { type: 'string' }\\n  },\\n  required: ['industry','tech_stack_signals','pain_points','buying_signals','icp_fit_score','score_reasoning'],\\n  additionalProperties: false\\n};\\nconst companyInfo = `Company: ${$json.company_name}\\nDomain: ${$json.domain}\\nLinkedIn: ${$json.linkedin_url}\\nSource: ${$json.source}`;\\nconst enrichment = $json.enrichment_content ? `\\n\\nEnrichment content: ${$json.enrichment_content}` : '';\\nconst user = `${companyInfo}${enrichment}\\n\\nProvide a JSON object matching this schema exactly (no extra text). Schema: ${JSON.stringify(schema)}`;\\nreturn [{ json: { messages: [ { role: 'system', content: system }, { role: 'user', content: user } ], company_name: $json.company_name, domain: $json.domain } }];"
+      },
+      "id": "5",
+      "name": "Build Claude Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "jsonParameters": true,
+        "headerParameters": [
+          {
+            "name": "x-api-key",
+            "value": "={{$env.ANTHROPIC_API_KEY}}"
+          },
+          {
+            "name": "anthropic-version",
+            "value": "2023-10-24"
+          }
+        ],
+        "options": {},
+        "bodyParametersJson": "={\"model\": \"claude-3\", \"messages\": $json.messages, \"max_tokens\": 300 }"
+      },
+      "id": "6",
+      "name": "Claude Lead Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parse Anthropic Messages API response, extract JSON payload, and attach fields for DB update\\nconst resp = items[0].json || {};\\nlet text = '';\\nif (resp.completion && Array.isArray(resp.completion.content)) {\\n  const part = resp.completion.content.find(c => c.type === 'output_text') || resp.completion.content[0];\\n  text = part && part.text ? part.text : (typeof resp.completion.content === 'string' ? resp.completion.content : '');\\n} else if (resp.completion && resp.completion.content && typeof resp.completion.content === 'string') {\\n  text = resp.completion.content;\\n} else if (resp.output_text) {\\n  text = resp.output_text;\\n} else if (resp.text) {\\n  text = resp.text;\\n}\\ntext = (text || '').trim();\\nlet data = null;\\ntry {\\n  data = JSON.parse(text);\\n} catch (e) {\\n  const m = text.match(/\\{[\\s\\S]*\\}/m);\\n  if (m) {\\n    try { data = JSON.parse(m[0]); } catch (e2) { data = null; }\\n  }\\n}\\nconst out = { raw_claude_response: resp, lead_summary_raw: text };\\nif (data) {\\n  out.industry = data.industry || null;\\n  out.tech_stack_signals = data.tech_stack_signals || null;\\n  out.pain_points = data.pain_points || null;\\n  out.buying_signals = data.buying_signals || null;\\n  out.icp_fit_score = data.icp_fit_score || null;\\n  out.score_reasoning = data.score_reasoning || null;\\n}\\nout.domain = $json.domain || $json[0]?.domain || null;\\nout.company_name = $json.company_name || null;\\nreturn [{ json: out }];"
+      },
+      "id": "7",
+      "name": "Parse Claude Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Build Slack message including enriched lead fields and any outreach drafts\\nconst lead = $json;\\nconst lines = [];\\nlines.push(`*${lead.company_name || 'Unknown company'}* (${lead.domain || 'no-domain'})`);\\nif (lead.industry) lines.push(`Industry: ${lead.industry}`);\\nif (lead.icp_fit_score !== undefined && lead.icp_fit_score !== null) lines.push(`ICP score: ${lead.icp_fit_score}`);\\nif (lead.score_reasoning) lines.push(`Reasoning: ${lead.score_reasoning}`);\\nif (lead.lead_summary_raw) lines.push(`Summary: \\n${lead.lead_summary_raw}`);\\nif (lead.subject_line) { lines.push(`\\n*Outreach Draft*\\nSubject: ${lead.subject_line}\\n${lead.opening_hook || ''}\\n${lead.email_body || ''}`); }\\nreturn [{ json: { text: lines.join('\\n') } }];"
+      },
+      "id": "8",
+      "name": "Create Slack Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "webhookUrl": "={{$env.SLACK_WEBHOOK_URL}}",
+        "method": "POST",
+        "bodyParametersJson": "={\"text\": $json.text }",
+        "options": {}
+      },
+      "id": "9",
+      "name": "Send Slack Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [2050, 300]
+    },
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "hour": 8,
+              "minute": 0
+            }
+          ]
+        }
+      },
+      "id": "10",
+      "name": "Daily Review",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "// This error trigger node is intended to catch workflow failures.\\nreturn items;"
+      },
+      "id": "11",
+      "name": "Handle Errors",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [650, 700]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.prequalified}}",
+              "operation": "isTrue"
+            }
+          ]
+        }
+      },
+      "id": "12",
+      "name": "Is Prequalified?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [750, 450]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "query": "=UPDATE leadgen.leads SET industry = '{{ $json.industry }}', tech_stack_signals = '{{ $json.tech_stack_signals }}'::text[], pain_points = '{{ $json.pain_points }}'::text[], buying_signals = '{{ $json.buying_signals }}'::text[], icp_fit_score = {{ $json.icp_fit_score }}, score_reasoning = '{{ $json.score_reasoning }}' WHERE domain = '{{ $json.domain }}';\nSELECT * FROM leadgen.leads WHERE domain = '{{ $json.domain }}';"
+      },
+      "id": "13",
+      "name": "Update Lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Check if icp_fit_score is high enough for outreach drafting using env threshold\\nconst score = $json.icp_fit_score || 0;\\nconst threshold = parseInt(process.env.ICP_SCORE_THRESHOLD || '70', 10);\\nreturn [{ json: { high_score: score >= threshold, icp_fit_score: score, domain: $json.domain, company_name: $json.company_name, pain_points: $json.pain_points, buying_signals: $json.buying_signals } }];"
+      },
+      "id": "14",
+      "name": "Check ICP Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.high_score}}",
+              "operation": "isTrue"
+            }
+          ]
+        }
+      },
+      "id": "15",
+      "name": "ICP >= 7?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2050, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Build personalization prompt messages using the personalization system instructions and lead context\\nconst system = `You are a sales personalization assistant. Create outreach content for a qualified lead using the company profile, pain points, and buying signals. Return exactly the fields subject_line, opening_hook, email_body, and linkedin_dm as valid JSON with no extra text.`;\\nconst user = `Company: ${$json.company_name}\\nPain points: ${JSON.stringify($json.pain_points || [])}\\nBuying signals: ${JSON.stringify($json.buying_signals || [])}\\nDomain: ${$json.domain}\\n\\nReturn the outreach fields as JSON matching the required schema exactly.`;\\nreturn [{ json: { messages: [ { role: 'system', content: system }, { role: 'user', content: user } ], domain: $json.domain } }];"
+      },
+      "id": "16",
+      "name": "Build Personalization Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [2250, 300]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "jsonParameters": true,
+        "headerParameters": [
+          {
+            "name": "x-api-key",
+            "value": "={{$env.ANTHROPIC_API_KEY}}"
+          },
+          {
+            "name": "anthropic-version",
+            "value": "2023-10-24"
+          }
+        ],
+        "options": {},
+        "bodyParametersJson": "={\"model\": \"claude-3\", \"messages\": $json.messages, \"max_tokens\": 400 }"
+      },
+      "id": "17",
+      "name": "Claude Personalization",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [2450, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parse personalization response, extract JSON fields and forward for DB update\\nconst resp = items[0].json || {};\\nlet text = '';\\nif (resp.completion && Array.isArray(resp.completion.content)) {\\n  const part = resp.completion.content.find(c => c.type === 'output_text') || resp.completion.content[0];\\n  text = part && part.text ? part.text : (typeof resp.completion.content === 'string' ? resp.completion.content : '');\\n} else if (resp.output_text) {\\n  text = resp.output_text;\\n} else if (resp.text) {\\n  text = resp.text;\\n}\\ntext = (text || '').trim();\\nlet data = null;\\ntry { data = JSON.parse(text); } catch (e) { const m = text.match(/\\{[\\s\\S]*\\}/m); if (m) { try { data = JSON.parse(m[0]); } catch (e2) { data = null; } } }\\nconst out = { raw_personalization_response: resp, personalization_raw: text };\\nif (data) { out.subject_line = data.subject_line || null; out.opening_hook = data.opening_hook || null; out.email_body = data.email_body || null; out.linkedin_dm = data.linkedin_dm || null; }\\nout.domain = $json.domain || null;\\nreturn [{ json: out }];"
+      },
+      "id": "18",
+      "name": "Parse Personalization Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [2650, 300]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "query": "=UPDATE leadgen.leads SET subject_line = '{{ $json.subject_line }}', opening_hook = '{{ $json.opening_hook }}', email_body = '{{ $json.email_body }}', linkedin_dm = '{{ $json.linkedin_dm }}' WHERE domain = '{{ $json.domain }}';\nSELECT * FROM leadgen.leads WHERE domain = '{{ $json.domain }}';"
+      },
+      "id": "19",
+      "name": "Update Lead Personalization",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [2850, 300]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts",
+        "jsonParameters": true,
+        "headerParameters": [
+          {
+            "name": "Authorization",
+            "value": "Bearer {{$env.HUBSPOT_API_KEY}}"
+          }
+        ],
+        "options": {},
+        "bodyParametersJson": "={\"properties\": {\"email\": $json.domain || '', \"company\": $json.company_name || ''}}"
+      },
+      "id": "20",
+      "name": "HubSpot Upsert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [3050, 300]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "query": "=UPDATE leadgen.leads SET crm_synced_at = NOW() WHERE domain = '{{ $json.domain }}';\nSELECT * FROM leadgen.leads WHERE domain = '{{ $json.domain }}';"
+      },
+      "id": "21",
+      "name": "Mark CRM Synced",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [3250, 300]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "https://api.apollo.io/v1/organizations/search",
+        "jsonParameters": true,
+        "headerParameters": [
+          {
+            "name": "Authorization",
+            "value": "Bearer {{$env.APOLLO_API_KEY}}"
+          }
+        ],
+        "options": {},
+        "bodyParametersJson": "={\"query\": {\"filters\": [{\"field\": \"industry\", \"operator\": \"=\", \"value\": \"software\"}]}}"
+      },
+      "id": "22",
+      "name": "Apollo Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [250, -100]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Normalize Apollo results into multiple items that match the Normalize Input shape\\nconst resp = items[0].json || {};\\nconst companies = resp.organizations || resp.results || [];\\nconst out = companies.map(c => ({ json: { company_name: c.name || c.org_name || '', domain: c.website || c.domain || '', linkedin_url: c.linkedin_url || c.linkedin || '', source: 'apollo' } }));\\nreturn out;"
+      },
+      "id": "23",
+      "name": "Normalize Apollo Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [450, -100]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "https://api.firecrawl.com/v1/scrape",
+        "jsonParameters": true,
+        "headerParameters": [
+          {
+            "name": "x-api-key",
+            "value": "={{$env.FIRECRAWL_API_KEY}}"
+          }
+        ],
+        "options": {},
+        "bodyParametersJson": "={\"url\": $json.domain }"
+      },
+      "id": "24",
+      "name": "Firecrawl Scrape",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [850, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Attach enrichment HTML/text into the item for the Claude prompt\\nconst resp = items[0].json || {};\\nconst scraped = resp.scrape_text || resp.html || JSON.stringify(resp);\\nreturn [{ json: { ...$json, enrichment_content: scraped } }];"
+      },
+      "id": "25",
+      "name": "Attach Enrichment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [950, 250]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Format an error object for alerting\\nconst e = items[0].json || {};\\nconst text = `Workflow error: ${e.errorMessage || JSON.stringify(e)}`;\\nreturn [{ json: { text } }];"
+      },
+      "id": "26",
+      "name": "Format Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [850, 700]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Input": {
+      "main": [
+        [
+          {
+            "node": "Save Lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Determine Flow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Lead": {
+      "main": [
+        [
+          {
+            "node": "Firecrawl Scrape",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Firecrawl Scrape": {
+      "main": [
+        [
+          {
+            "node": "Attach Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Build Claude Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine Flow": {
+      "main": [
+        [
+          {
+            "node": "Is Prequalified?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Prequalified?": {
+      "main": [
+        [
+          {
+            "node": "Build Claude Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Slack Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Claude Prompt": {
+      "main": [
+        [
+          {
+            "node": "Claude Lead Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Lead Summary": {
+      "main": [
+        [
+          {
+            "node": "Parse Claude Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Claude Response": {
+      "main": [
+        [
+          {
+            "node": "Update Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Lead": {
+      "main": [
+        [
+          {
+            "node": "Check ICP Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check ICP Score": {
+      "main": [
+        [
+          {
+            "node": "ICP >= 7?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ICP >= 7?": {
+      "main": [
+        [
+          {
+            "node": "Build Personalization Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Personalization Prompt": {
+      "main": [
+        [
+          {
+            "node": "Claude Personalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Personalization": {
+      "main": [
+        [
+          {
+            "node": "Parse Personalization Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Personalization Response": {
+      "main": [
+        [
+          {
+            "node": "Update Lead Personalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Lead Personalization": {
+      "main": [
+        [
+          {
+            "node": "HubSpot Upsert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot Upsert": {
+      "main": [
+        [
+          {
+            "node": "Mark CRM Synced",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark CRM Synced": {
+      "main": [
+        [
+          {
+            "node": "Create Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Slack Message": {
+      "main": [
+        [
+          {
+            "node": "Send Slack Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apollo Search": {
+      "main": [
+        [
+          {
+            "node": "Normalize Apollo Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Apollo Result": {
+      "main": [
+        [
+          {
+            "node": "Save Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Review": {
+      "main": []
+    },
+    "Handle Errors": {
+      "main": [
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error": {
+      "main": [
+        [
+          {
+            "node": "Send Slack Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "staticData": {}
+}

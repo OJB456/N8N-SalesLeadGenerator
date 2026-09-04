@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "properties": {
+    "industry": {"type": "string"},
+    "tech_stack_signals": {"type": "array", "items": {"type": "string"}},
+    "pain_points": {"type": "array", "items": {"type": "string"}},
+    "buying_signals": {"type": "array", "items": {"type": "string"}},
+    "icp_fit_score": {"type": "integer"},
+    "score_reasoning": {"type": "string"}
+  },
+  "required": ["industry","tech_stack_signals","pain_points","buying_signals","icp_fit_score","score_reasoning"],
+  "additionalProperties": false
+}

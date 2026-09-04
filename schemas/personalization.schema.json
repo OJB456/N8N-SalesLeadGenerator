@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "subject_line": {"type": "string"},
+    "opening_hook": {"type": "string"},
+    "email_body": {"type": "string"},
+    "linkedin_dm": {"type": "string"}
+  },
+  "required": ["subject_line","opening_hook","email_body","linkedin_dm"],
+  "additionalProperties": false
+}
