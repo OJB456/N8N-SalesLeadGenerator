@@ -59,62 +59,6 @@ Claude personalization ---------> HubSpot sync and Slack alert
 └── README.md
 ```
 
-## Quick start
-
-### Prerequisites
-
-- Docker Desktop with Compose
-- API credentials for the services you want to enable
-
-1. Copy the example environment file:
-
-```bash
-cp .env.example .env
-```
-
-2. Fill in the required values in `.env`:
-
-- `ANTHROPIC_API_KEY`
-- `APOLLO_API_KEY`
-- `FIRECRAWL_API_KEY`
-- `HUBSPOT_API_KEY`
-- `SLACK_WEBHOOK_URL`
-- `POSTGRES_USER`
-- `POSTGRES_PASSWORD`
-- `N8N_ENCRYPTION_KEY`
-- `N8N_BASIC_AUTH_USER`
-- `N8N_BASIC_AUTH_PASSWORD`
-
-3. Start the stack:
-
-```bash
-docker compose up -d
-```
-
-The PostgreSQL container runs `sql/init.sql` automatically on first boot.
-
-## Configure n8n credentials
-
-After the services are running, open n8n at `http://localhost:5678` and authenticate with the basic auth credentials you configured.
-
-Create the following credentials in n8n:
-
-- **Anthropic HTTP Header Auth**
-  - Header Name: `x-api-key`
-  - Header Value: `{{$env.ANTHROPIC_API_KEY}}`
-- **HubSpot API Key** or Bearer token credential
-- **Slack webhook** can be used either with a Slack webhook credential or via `{{$env.SLACK_WEBHOOK_URL}}` in the Slack node.
-
-## Import and run the workflow
-
-Import the pipeline via n8n UI or CLI:
-
-```bash
-docker compose exec n8n n8n import:workflow --input=/data/workflows/lead-gen-pipeline.json
-```
-
-Activate the workflow after import. The workflow is intentionally exported inactive so it can be reviewed before processing live data.
-
 ## Webhook contract
 
 The workflow exposes a webhook at:
